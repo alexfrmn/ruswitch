@@ -12,7 +12,13 @@ class DictionaryManager:
 
     def __init__(self, config: Config, dict_dir: Optional[Path] = None):
         self.config = config
-        self.dict_dir = dict_dir or Path(__file__).parent / 'dictionaries'
+        if dict_dir:
+            self.dict_dir = dict_dir
+        else:
+            # PyInstaller bundles data into sys._MEIPASS temp dir
+            import sys
+            base = getattr(sys, '_MEIPASS', Path(__file__).parent)
+            self.dict_dir = Path(base) / 'dictionaries'
         self._ru_words: set[str] = set()
         self._en_words: set[str] = set()
         self._user_words: dict[str, set[str]] = {'ru': set(), 'en': set()}
