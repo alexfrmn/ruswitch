@@ -8,8 +8,67 @@ from typing import Optional
 from config import Config
 from dictionary import DictionaryManager
 
-# Version
-VERSION = '1.0.0'
+VERSION = '1.1.0'
+
+
+class HotkeyButton(ttk.Button):
+    """A button that captures the next keypress as a hotkey."""
+
+    def __init__(self, parent, variable: tk.StringVar, **kwargs):
+        self._variable = variable
+        self._listening = False
+        super().__init__(parent, text=variable.get(), command=self._start_listen,
+                         width=18, **kwargs)
+        self._variable.trace_add('write', self._on_var_change)
+
+    def _on_var_change(self, *_args):
+        if not self._listening:
+            self.configure(text=self._variable.get())
+
+    def _start_listen(self):
+        """Start listening for a key press."""
+        self._listening = True
+        self.configure(text='[ Press a key... ]')
+        # Bind to the top-level window to catch all key events
+        self.winfo_toplevel().bind('<Key>', self._on_key_captured)
+
+    def _on_key_captured(self, event):
+        """Capture the pressed key."""
+        self.winfo_toplevel().unbind('<Key>')
+        self._listening = False
+
+        # Translate tkinter keysym to keyboard library format
+        key = event.keysym.lower()
+        # Map common tkinter names to keyboard library names
+        key_map = {
+            'insert': 'insert', 'delete': 'delete',
+            'home': 'home', 'end': 'end',
+            'prior': 'page up', 'next': 'page down',
+            'pause': 'pause', 'scroll_lock': 'scroll lock',
+            'f1': 'f1', 'f2': 'f2', 'f3': 'f3', 'f4': 'f4',
+            'f5': 'f5', 'f6': 'f6', 'f7': 'f7', 'f8': 'f8',
+            'f9': 'f9', 'f10': 'f10', 'f11': 'f11', 'f12': 'f12',
+        }
+        key = key_map.get(key, key)
+
+        # Build modifier prefix
+        parts = []
+        if event.state & 0x4:  # Control
+            parts.append('ctrl')
+        if event.state & 0x8:  # Alt
+            parts.append('alt')
+        if event.state & 0x1:  # Shift
+            parts.append('shift')
+
+        # Don't add modifier-only keys as the main key
+        if key not in ('control_l', 'control_r', 'alt_l', 'alt_r',
+                        'shift_l', 'shift_r', 'ctrl', 'alt', 'shift'):
+            parts.append(key)
+
+        hotkey = '+'.join(parts) if parts else key
+        self._variable.set(hotkey)
+        self.configure(text=hotkey)
+        return 'break'
 
 
 class SettingsWindow:
@@ -23,35 +82,30 @@ class SettingsWindow:
         self._root: Optional[tk.Tk] = None
 
     def show(self) -> None:
-        """Show the settings window (creates new Tk root if needed)."""
         if self._root and self._root.winfo_exists():
             self._root.lift()
             return
 
         self._root = tk.Tk()
         self._root.title('RuSwitch Settings')
-        self._root.geometry('500x400')
+        self._root.geometry('500x450')
         self._root.resizable(False, False)
 
         notebook = ttk.Notebook(self._root)
         notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Tab: General
         general_frame = ttk.Frame(notebook, padding=10)
         notebook.add(general_frame, text='General')
         self._build_general_tab(general_frame)
 
-        # Tab: Dictionary
         dict_frame = ttk.Frame(notebook, padding=10)
         notebook.add(dict_frame, text='Dictionary')
         self._build_dictionary_tab(dict_frame)
 
-        # Tab: About
         about_frame = ttk.Frame(notebook, padding=10)
         notebook.add(about_frame, text='About')
         self._build_about_tab(about_frame)
 
-        # Buttons
         btn_frame = ttk.Frame(self._root)
         btn_frame.pack(fill=tk.X, padx=5, pady=5)
         ttk.Button(btn_frame, text='Save', command=self._save).pack(side=tk.RIGHT, padx=5)
@@ -78,20 +132,24 @@ class SettingsWindow:
         ttk.Spinbox(parent, from_=1, to=20, textvariable=self._threshold_var,
                      width=5).grid(row=3, column=1, sticky=tk.W, pady=2)
 
-        ttk.Label(parent, text='Manual remap hotkey:').grid(row=4, column=0, sticky=tk.W, pady=2)
+        # Hotkey buttons with key capture
+        ttk.Label(parent, text='Manual remap hotkey:').grid(row=4, column=0, sticky=tk.W, pady=4)
         self._hotkey_manual_var = tk.StringVar(value=self.config.hotkey_manual)
-        ttk.Entry(parent, textvariable=self._hotkey_manual_var,
-                  width=15).grid(row=4, column=1, sticky=tk.W, pady=2)
+        HotkeyButton(parent, self._hotkey_manual_var).grid(
+            row=4, column=1, sticky=tk.W, pady=4)
 
-        ttk.Label(parent, text='Toggle hotkey:').grid(row=5, column=0, sticky=tk.W, pady=2)
+        ttk.Label(parent, text='Toggle hotkey:').grid(row=5, column=0, sticky=tk.W, pady=4)
         self._hotkey_toggle_var = tk.StringVar(value=self.config.hotkey_toggle)
-        ttk.Entry(parent, textvariable=self._hotkey_toggle_var,
-                  width=15).grid(row=5, column=1, sticky=tk.W, pady=2)
+        HotkeyButton(parent, self._hotkey_toggle_var).grid(
+            row=5, column=1, sticky=tk.W, pady=4)
+
+        ttk.Label(parent, text='(Click button, then press desired key)',
+                  foreground='gray').grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=2)
 
         ttk.Label(parent, text='Excluded processes (one per line):').grid(
-            row=6, column=0, columnspan=2, sticky=tk.W, pady=(10, 2))
+            row=7, column=0, columnspan=2, sticky=tk.W, pady=(10, 2))
         self._excluded_text = tk.Text(parent, height=4, width=40)
-        self._excluded_text.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self._excluded_text.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=2)
         self._excluded_text.insert('1.0', '\n'.join(self.config.excluded_processes))
 
     def _build_dictionary_tab(self, parent: ttk.Frame) -> None:
@@ -131,6 +189,17 @@ class SettingsWindow:
         ttk.Label(parent, text='github.com/alexfrmn/ruswitch',
                   foreground='blue', cursor='hand2').pack(pady=10)
 
+        # Log location
+        import os
+        from pathlib import Path
+        appdata = os.environ.get('APPDATA', '')
+        if appdata:
+            log_path = Path(appdata) / 'RuSwitch' / 'logs' / 'ruswitch.log'
+        else:
+            log_path = Path.home() / '.config' / 'ruswitch' / 'logs' / 'ruswitch.log'
+        ttk.Label(parent, text=f'Log: {log_path}',
+                  foreground='gray', wraplength=450).pack(pady=5)
+
     def _add_word_dialog(self) -> None:
         dialog = tk.Toplevel(self._root)
         dialog.title('Add Word')
@@ -162,7 +231,6 @@ class SettingsWindow:
         if not sel:
             return
         item = self._word_listbox.get(sel[0])
-        # Parse "[RU] word" or "[EN] word"
         lang = item[1:3].lower()
         word = item[5:]
         self.dictionary.remove_word(word, lang)
