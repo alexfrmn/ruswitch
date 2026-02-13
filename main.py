@@ -15,6 +15,14 @@ log = logging.getLogger('ruswitch')
 # Ensure single instance (Windows only)
 _mutex = None
 
+# Shift key mappings for US QWERTY (physical key → shifted character)
+_SHIFT_MAP = {
+    '`': '~', '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+    '6': '^', '7': '&', '8': '*', '9': '(', '0': ')', '-': '_',
+    '=': '+', '[': '{', ']': '}', '\\': '|', ';': ':', "'": '"',
+    ',': '<', '.': '>', '/': '?',
+}
+
 
 def _ensure_single_instance() -> bool:
     """Create a Windows mutex to prevent multiple instances. Returns False if already running."""
@@ -28,6 +36,23 @@ def _ensure_single_instance() -> bool:
     return True
 
 
+def _get_current_layout() -> str:
+    """Get keyboard layout of the foreground window: 'ru' or 'en'."""
+    if sys.platform != 'win32':
+        return 'en'
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        thread_id = user32.GetWindowThreadProcessId(hwnd, None)
+        hkl = user32.GetKeyboardLayout(thread_id)
+        lang_id = hkl & 0xFFFF
+        # 0x0419 = Russian
+        return 'ru' if lang_id == 0x0419 else 'en'
+    except Exception:
+        return 'en'
+
+
 def _get_foreground_process() -> str:
     """Get the exe name of the currently focused window (Windows only)."""
     if sys.platform != 'win32':
@@ -39,7 +64,6 @@ def _get_foreground_process() -> str:
         hwnd = user32.GetForegroundWindow()
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        # Open process to get name
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         handle = ctypes.windll.kernel32.OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
@@ -53,6 +77,31 @@ def _get_foreground_process() -> str:
     except Exception:
         pass
     return ''
+
+
+def _translate_key(event_name: str, layout: str, shift_held: bool) -> str:
+    """Translate physical key name to actual on-screen character.
+
+    The keyboard library always returns physical key names (US QWERTY).
+    We need to translate to what the user actually sees on screen,
+    based on the current keyboard layout and shift state.
+    """
+    from keymap import EN_TO_RU
+
+    char = event_name
+
+    # Step 1: Apply shift (physical key → shifted US character)
+    if shift_held:
+        if char.isalpha():
+            char = char.upper()
+        else:
+            char = _SHIFT_MAP.get(char, char)
+
+    # Step 2: Apply layout (US character → layout character)
+    if layout == 'ru':
+        char = EN_TO_RU.get(char, char)
+
+    return char
 
 
 class RuSwitch:
@@ -124,21 +173,22 @@ class RuSwitch:
         # Clear buffer on modifier keys
         if event.name in ('ctrl', 'alt', 'shift', 'tab', 'escape',
                           'left ctrl', 'right ctrl', 'left alt', 'right alt',
-                          'left shift', 'right shift'):
+                          'left shift', 'right shift', 'caps lock'):
             self.detector.clear_buffer()
             return
 
-        # Skip non-character keys
-        char = event.name
-        if len(char) != 1:
+        # Get the physical key name from the keyboard library
+        key_name = event.name
+
+        if len(key_name) != 1:
             # Handle special named keys
-            if char == 'space':
-                char = ' '
-            elif char == 'enter':
-                char = '\n'
-            elif char in ('backspace', 'delete', 'home', 'end',
-                          'left', 'right', 'up', 'down',
-                          'page up', 'page down', 'insert'):
+            if key_name == 'space':
+                key_name = ' '
+            elif key_name == 'enter':
+                key_name = '\n'
+            elif key_name in ('backspace', 'delete', 'home', 'end',
+                              'left', 'right', 'up', 'down',
+                              'page up', 'page down', 'insert'):
                 self.detector.clear_buffer()
                 return
             else:
@@ -147,19 +197,40 @@ class RuSwitch:
         if not self._active:
             return
 
-        result = self.detector.feed_char(char)
+        # Translate physical key to actual on-screen character
+        if key_name in (' ', '\n'):
+            actual_char = key_name
+        else:
+            layout = _get_current_layout()
+            shift_held = kb.is_pressed('shift')
+            actual_char = _translate_key(key_name, layout, shift_held)
+
+        log.debug('Key: %r → char: %r (layout=%s)',
+                  event.name, actual_char, layout if key_name not in (' ', '\n') else '-')
+
+        result = self.detector.feed_char(actual_char)
         if result:
-            log.info('Correction: "%s" -> "%s" (%s)',
+            log.info('Correction: "%s" → "%s" (%s)',
                      result.original, result.corrected, result.direction)
-            self.replacer.replace_word(result.original, result.corrected)
-            if self.config.show_notification:
-                self.tray.notify(f'{result.original} -> {result.corrected}')
+            # Run replacement in separate thread to not block the hook
+            threading.Thread(
+                target=self._do_replace,
+                args=(result,),
+                daemon=True,
+            ).start()
+
+    def _do_replace(self, result) -> None:
+        """Perform text replacement in a separate thread."""
+        self.replacer.replace_word(
+            result.original, result.corrected, result.boundary_char)
+        if self.config.show_notification:
+            self.tray.notify(f'{result.original} → {result.corrected}')
 
     def _manual_remap(self) -> None:
         """Insert key: force remap current buffer without dictionary check."""
         result = self.detector.force_check()
         if result:
-            log.info('Manual remap: "%s" -> "%s"', result.original, result.corrected)
+            log.info('Manual remap: "%s" → "%s"', result.original, result.corrected)
             self.replacer.replace_word(result.original, result.corrected)
 
     def _toggle(self) -> None:
@@ -183,7 +254,6 @@ class RuSwitch:
         """Called when settings are saved."""
         self._active = self.config.auto_mode
         self.tray.update(self._active)
-        # Re-register hotkeys
         import keyboard
         keyboard.remove_all_hotkeys()
         keyboard.add_hotkey(self.config.hotkey_manual, self._manual_remap)

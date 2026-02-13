@@ -50,11 +50,15 @@ class Replacer:
         self._undo_stack: deque[UndoEntry] = deque(maxlen=self.UNDO_MAX)
         self._saved_clipboard: Optional[str] = None
 
-    def replace_word(self, original: str, corrected: str) -> bool:
+    def replace_word(self, original: str, corrected: str,
+                     boundary_char: str = '') -> bool:
         """Replace the just-typed word with corrected version.
 
-        Sequence: save clipboard → backspace × len(original) → copy corrected →
-        Ctrl+V → restore clipboard.
+        The boundary character (space, period, etc.) has already been typed
+        into the application, so we must remove it too and re-type it after.
+
+        Sequence: backspace × (len + 1 for boundary) → paste corrected +
+        boundary → restore clipboard.
 
         Returns True on success.
         """
@@ -63,18 +67,23 @@ class Replacer:
 
         self.is_replacing = True
         try:
+            # Small delay to let the boundary char reach the application
+            time.sleep(0.03)
+
             # Save current clipboard
             self._saved_clipboard = self._get_clipboard()
 
-            # Backspace to remove original word
-            for _ in range(len(original)):
+            # Backspace to remove original word + boundary char
+            total_bs = len(original) + (1 if boundary_char else 0)
+            for _ in range(total_bs):
                 keyboard.send('backspace')
                 time.sleep(self.BACKSPACE_DELAY)
 
             time.sleep(self.PRE_PASTE_DELAY)
 
-            # Set clipboard to corrected word and paste
-            self._set_clipboard(corrected)
+            # Paste corrected word + boundary char
+            paste_text = corrected + boundary_char
+            self._set_clipboard(paste_text)
             keyboard.send('ctrl+v')
 
             time.sleep(self.POST_PASTE_DELAY)
