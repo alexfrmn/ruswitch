@@ -147,9 +147,11 @@ class RuSwitch:
         # Register keyboard hook
         keyboard.on_press(self._on_key_press, suppress=False)
 
-        # Register hotkeys
-        keyboard.add_hotkey(self.config.hotkey_manual, self._manual_remap)
-        keyboard.add_hotkey(self.config.hotkey_toggle, self._toggle)
+        # Register hotkeys (suppress=True prevents default Insert behavior)
+        keyboard.add_hotkey(self.config.hotkey_manual, self._manual_remap,
+                            suppress=True)
+        keyboard.add_hotkey(self.config.hotkey_toggle, self._toggle,
+                            suppress=True)
 
         log.info('RuSwitch started. Hotkeys: manual=%s, toggle=%s',
                  self.config.hotkey_manual, self.config.hotkey_toggle)
@@ -256,8 +258,10 @@ class RuSwitch:
         self.tray.update(self._active)
         import keyboard
         keyboard.remove_all_hotkeys()
-        keyboard.add_hotkey(self.config.hotkey_manual, self._manual_remap)
-        keyboard.add_hotkey(self.config.hotkey_toggle, self._toggle)
+        keyboard.add_hotkey(self.config.hotkey_manual, self._manual_remap,
+                            suppress=True)
+        keyboard.add_hotkey(self.config.hotkey_toggle, self._toggle,
+                            suppress=True)
         log.info('Settings saved and applied')
 
     def _exit(self) -> None:
