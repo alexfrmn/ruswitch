@@ -8,15 +8,40 @@ from typing import Optional
 from config import Config
 from dictionary import DictionaryManager
 
-VERSION = '1.1.0'
+VERSION = '1.2.0'
+
+# Modifier keysyms (tkinter names)
+_MODIFIER_KEYSYMS = {
+    'control_l', 'control_r', 'alt_l', 'alt_r',
+    'shift_l', 'shift_r', 'super_l', 'super_r',
+    'meta_l', 'meta_r',
+}
+
+# Map tkinter keysym → keyboard library name
+_KEYSYM_MAP = {
+    'insert': 'insert', 'delete': 'delete',
+    'home': 'home', 'end': 'end',
+    'prior': 'page up', 'next': 'page down',
+    'pause': 'pause', 'scroll_lock': 'scroll lock',
+    'f1': 'f1', 'f2': 'f2', 'f3': 'f3', 'f4': 'f4',
+    'f5': 'f5', 'f6': 'f6', 'f7': 'f7', 'f8': 'f8',
+    'f9': 'f9', 'f10': 'f10', 'f11': 'f11', 'f12': 'f12',
+    'escape': 'esc', 'return': 'enter', 'space': 'space',
+    'backspace': 'backspace', 'tab': 'tab',
+}
 
 
 class HotkeyButton(ttk.Button):
-    """A button that captures the next keypress as a hotkey."""
+    """A button that captures the next keypress as a hotkey.
+
+    Tracks modifier keys explicitly via KeyPress/KeyRelease instead of
+    relying on event.state (which has phantom bits on Windows).
+    """
 
     def __init__(self, parent, variable: tk.StringVar, **kwargs):
         self._variable = variable
         self._listening = False
+        self._held_modifiers: set[str] = set()
         super().__init__(parent, text=variable.get(), command=self._start_listen,
                          width=18, **kwargs)
         self._variable.trace_add('write', self._on_var_change)
@@ -28,47 +53,61 @@ class HotkeyButton(ttk.Button):
     def _start_listen(self):
         """Start listening for a key press."""
         self._listening = True
+        self._held_modifiers.clear()
         self.configure(text='[ Press a key... ]')
-        # Bind to the top-level window to catch all key events
-        self.winfo_toplevel().bind('<Key>', self._on_key_captured)
+        top = self.winfo_toplevel()
+        top.bind('<KeyPress>', self._on_key_down)
+        top.bind('<KeyRelease>', self._on_key_up)
 
-    def _on_key_captured(self, event):
-        """Capture the pressed key."""
-        self.winfo_toplevel().unbind('<Key>')
+    def _on_key_down(self, event):
+        """Track modifier presses; capture non-modifier key."""
+        keysym = event.keysym.lower()
+
+        # Track modifier keys
+        if keysym in ('control_l', 'control_r'):
+            self._held_modifiers.add('ctrl')
+            return 'break'
+        if keysym in ('alt_l', 'alt_r'):
+            self._held_modifiers.add('alt')
+            return 'break'
+        if keysym in ('shift_l', 'shift_r'):
+            self._held_modifiers.add('shift')
+            return 'break'
+        if keysym in ('super_l', 'super_r', 'meta_l', 'meta_r'):
+            return 'break'
+
+        # Non-modifier key — finalize the hotkey
+        self._finalize(keysym)
+        return 'break'
+
+    def _on_key_up(self, event):
+        """Track modifier releases."""
+        keysym = event.keysym.lower()
+        if keysym in ('control_l', 'control_r'):
+            self._held_modifiers.discard('ctrl')
+        elif keysym in ('alt_l', 'alt_r'):
+            self._held_modifiers.discard('alt')
+        elif keysym in ('shift_l', 'shift_r'):
+            self._held_modifiers.discard('shift')
+        return 'break'
+
+    def _finalize(self, keysym: str):
+        """Build hotkey string and stop listening."""
+        top = self.winfo_toplevel()
+        top.unbind('<KeyPress>')
+        top.unbind('<KeyRelease>')
         self._listening = False
 
-        # Translate tkinter keysym to keyboard library format
-        key = event.keysym.lower()
-        # Map common tkinter names to keyboard library names
-        key_map = {
-            'insert': 'insert', 'delete': 'delete',
-            'home': 'home', 'end': 'end',
-            'prior': 'page up', 'next': 'page down',
-            'pause': 'pause', 'scroll_lock': 'scroll lock',
-            'f1': 'f1', 'f2': 'f2', 'f3': 'f3', 'f4': 'f4',
-            'f5': 'f5', 'f6': 'f6', 'f7': 'f7', 'f8': 'f8',
-            'f9': 'f9', 'f10': 'f10', 'f11': 'f11', 'f12': 'f12',
-        }
-        key = key_map.get(key, key)
+        # Translate keysym to keyboard library format
+        key = _KEYSYM_MAP.get(keysym, keysym)
 
-        # Build modifier prefix
-        parts = []
-        if event.state & 0x4:  # Control
-            parts.append('ctrl')
-        if event.state & 0x8:  # Alt
-            parts.append('alt')
-        if event.state & 0x1:  # Shift
-            parts.append('shift')
+        # Build combo: modifiers (sorted) + key
+        parts = sorted(self._held_modifiers)  # ctrl, alt, shift order
+        parts.append(key)
 
-        # Don't add modifier-only keys as the main key
-        if key not in ('control_l', 'control_r', 'alt_l', 'alt_r',
-                        'shift_l', 'shift_r', 'ctrl', 'alt', 'shift'):
-            parts.append(key)
-
-        hotkey = '+'.join(parts) if parts else key
+        hotkey = '+'.join(parts)
         self._variable.set(hotkey)
         self.configure(text=hotkey)
-        return 'break'
 
 
 class SettingsWindow:

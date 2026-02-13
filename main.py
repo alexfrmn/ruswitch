@@ -5,6 +5,7 @@ import os
 import threading
 import logging
 import time
+import queue
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
@@ -146,6 +147,7 @@ class RuSwitch:
         self._active = self.config.auto_mode
         self._manual_hotkey_id = None
         self._toggle_hotkey_id = None
+        self._key_queue = queue.Queue()
         self._settings_window = SettingsWindow(
             self.config, self.dictionary, on_save=self._on_settings_save)
 
@@ -163,7 +165,11 @@ class RuSwitch:
 
         import keyboard
 
-        keyboard.on_press(self._on_key_press, suppress=False)
+        # Start key processing thread (keeps hook callback fast for other apps)
+        t = threading.Thread(target=self._process_keys, daemon=True)
+        t.start()
+
+        keyboard.on_press(self._on_key_press_fast, suppress=False)
         self._register_hotkeys()
 
         log.info('RuSwitch started. Hotkeys: manual=%s, toggle=%s',
@@ -193,10 +199,32 @@ class RuSwitch:
         log.info('Hotkeys registered: manual=%s, toggle=%s',
                  self.config.hotkey_manual, self.config.hotkey_toggle)
 
-    def _on_key_press(self, event) -> None:
-        """Keyboard hook callback."""
-        import keyboard as kb
+    def _on_key_press_fast(self, event) -> None:
+        """Lightweight hook callback — just enqueue and return fast.
 
+        This keeps the Windows low-level hook responsive so other programs
+        (Vowen AI, AutoHotkey, etc.) still receive keystrokes.
+        """
+        import keyboard as kb
+        # Capture shift state NOW (in the hook thread) before it changes
+        shift_held = kb.is_pressed('shift')
+        self._key_queue.put((event.name, shift_held))
+
+    def _process_keys(self) -> None:
+        """Background thread: process keystrokes from the queue."""
+        while True:
+            try:
+                key_name, shift_held = self._key_queue.get()
+            except Exception:
+                continue
+
+            try:
+                self._handle_key(key_name, shift_held)
+            except Exception:
+                log.exception('Error processing key %r', key_name)
+
+    def _handle_key(self, key_name: str, shift_held: bool) -> None:
+        """Process a single keystroke (runs in background thread)."""
         if self.replacer.is_replacing:
             return
 
@@ -205,14 +233,12 @@ class RuSwitch:
             return
 
         # Clear buffer on modifier keys
-        if event.name in ('ctrl', 'alt', 'shift', 'tab', 'escape',
-                          'left ctrl', 'right ctrl', 'left alt', 'right alt',
-                          'left shift', 'right shift', 'caps lock',
-                          'left windows', 'right windows'):
+        if key_name in ('ctrl', 'alt', 'shift', 'tab', 'escape',
+                        'left ctrl', 'right ctrl', 'left alt', 'right alt',
+                        'left shift', 'right shift', 'caps lock',
+                        'left windows', 'right windows'):
             self.detector.clear_buffer()
             return
-
-        key_name = event.name
 
         if len(key_name) != 1:
             if key_name == 'space':
@@ -221,10 +247,11 @@ class RuSwitch:
                 key_name = '\n'
             elif key_name in ('backspace', 'delete', 'home', 'end',
                               'left', 'right', 'up', 'down',
-                              'page up', 'page down', 'insert'):
+                              'page up', 'page down'):
                 self.detector.clear_buffer()
                 return
             else:
+                # Unknown special key (incl. insert) — ignore, keep buffer
                 return
 
         if not self._active:
@@ -236,13 +263,10 @@ class RuSwitch:
             layout = _get_current_layout()
         else:
             layout = _get_current_layout()
-            shift_held = kb.is_pressed('shift')
             actual_char = _translate_key(key_name, layout, shift_held)
 
         log.debug('key=%r layout=%s shift=%s -> char=%r buf=%s',
-                  event.name, layout,
-                  kb.is_pressed('shift') if key_name not in (' ', '\n') else '-',
-                  actual_char,
+                  key_name, layout, shift_held, actual_char,
                   ''.join(self.detector._buffer) + actual_char)
 
         result = self.detector.feed_char(actual_char)
