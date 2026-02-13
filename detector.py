@@ -26,6 +26,7 @@ class CorrectionResult:
     original: str
     corrected: str
     direction: str  # 'en_to_ru' or 'ru_to_en'
+    boundary_char: str = ''  # character that triggered the correction
 
 
 class LayoutDetector:
@@ -64,6 +65,8 @@ class LayoutDetector:
         if char in _WORD_BOUNDARIES:
             result = self._analyze_buffer()
             self._buffer.clear()
+            if result:
+                result.boundary_char = char
             return result
         self._buffer.append(char)
         return None

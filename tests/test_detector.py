@@ -59,6 +59,7 @@ class TestDetectorWrongLayout:
         assert result is not None
         assert result.corrected == 'привет'
         assert result.direction == 'en_to_ru'
+        assert result.boundary_char == ' '
 
     def test_ru_typed_as_en_corrected(self):
         """'руддщ' (hello typed on RU layout) -> correction to 'hello'."""
