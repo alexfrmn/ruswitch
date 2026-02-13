@@ -25,7 +25,7 @@ jobs:
         run: python -m pytest tests/ -v
 
       - name: Build .exe
-        run: pyinstaller --onefile --noconsole --name=RuSwitch main.py
+        run: pyinstaller --onefile --noconsole --add-data "dictionaries;dictionaries" --name=RuSwitch main.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
