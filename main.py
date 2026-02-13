@@ -4,18 +4,43 @@ import sys
 import os
 import threading
 import logging
+import time
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler()],
+# --- File logging setup ---
+def _get_log_dir() -> Path:
+    appdata = os.environ.get('APPDATA', '')
+    if appdata:
+        d = Path(appdata) / 'RuSwitch' / 'logs'
+    else:
+        d = Path.home() / '.config' / 'ruswitch' / 'logs'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+_log_dir = _get_log_dir()
+_file_handler = TimedRotatingFileHandler(
+    _log_dir / 'ruswitch.log',
+    when='D', interval=1, backupCount=1,  # keep today + 1 day
+    encoding='utf-8',
 )
+_file_handler.setLevel(logging.DEBUG)
+_file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s [%(levelname)s] %(message)s'))
+
+_console_handler = logging.StreamHandler()
+_console_handler.setLevel(logging.INFO)
+_console_handler.setFormatter(logging.Formatter(
+    '%(asctime)s [%(levelname)s] %(message)s'))
+
+logging.basicConfig(level=logging.DEBUG, handlers=[_console_handler, _file_handler])
 log = logging.getLogger('ruswitch')
+log.info('Log file: %s', _log_dir / 'ruswitch.log')
 
 # Ensure single instance (Windows only)
 _mutex = None
 
-# Shift key mappings for US QWERTY (physical key → shifted character)
+# Shift key mappings for US QWERTY (physical key -> shifted character)
 _SHIFT_MAP = {
     '`': '~', '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
     '6': '^', '7': '&', '8': '*', '9': '(', '0': ')', '-': '_',
@@ -25,13 +50,12 @@ _SHIFT_MAP = {
 
 
 def _ensure_single_instance() -> bool:
-    """Create a Windows mutex to prevent multiple instances. Returns False if already running."""
     if sys.platform != 'win32':
         return True
     import ctypes
     global _mutex
     _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, 'Global\\RuSwitch_Mutex')
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+    if ctypes.windll.kernel32.GetLastError() == 183:
         return False
     return True
 
@@ -47,14 +71,12 @@ def _get_current_layout() -> str:
         thread_id = user32.GetWindowThreadProcessId(hwnd, None)
         hkl = user32.GetKeyboardLayout(thread_id)
         lang_id = hkl & 0xFFFF
-        # 0x0419 = Russian
         return 'ru' if lang_id == 0x0419 else 'en'
     except Exception:
         return 'en'
 
 
 def _get_foreground_process() -> str:
-    """Get the exe name of the currently focused window (Windows only)."""
     if sys.platform != 'win32':
         return ''
     try:
@@ -80,24 +102,19 @@ def _get_foreground_process() -> str:
 
 
 def _translate_key(event_name: str, layout: str, shift_held: bool) -> str:
-    """Translate physical key name to actual on-screen character.
-
-    The keyboard library always returns physical key names (US QWERTY).
-    We need to translate to what the user actually sees on screen,
-    based on the current keyboard layout and shift state.
-    """
+    """Translate physical key name to actual on-screen character."""
     from keymap import EN_TO_RU
 
     char = event_name
 
-    # Step 1: Apply shift (physical key → shifted US character)
+    # Step 1: Apply shift
     if shift_held:
         if char.isalpha():
             char = char.upper()
         else:
             char = _SHIFT_MAP.get(char, char)
 
-    # Step 2: Apply layout (US character → layout character)
+    # Step 2: Apply layout
     if layout == 'ru':
         char = EN_TO_RU.get(char, char)
 
@@ -116,16 +133,19 @@ class RuSwitch:
         from settings_gui import SettingsWindow
 
         self.config = Config.load()
-        log.info('Config loaded: auto_mode=%s', self.config.auto_mode)
+        log.info('Config loaded: auto_mode=%s, hotkey_manual=%s, hotkey_toggle=%s',
+                 self.config.auto_mode, self.config.hotkey_manual, self.config.hotkey_toggle)
 
         self.dictionary = DictionaryManager(self.config)
         stats = self.dictionary.stats
-        log.info('Dictionaries loaded: %d RU + %d EN base, %d+%d user',
+        log.info('Dictionaries: %d RU + %d EN base, %d+%d user',
                  stats['ru_base'], stats['en_base'], stats['ru_user'], stats['en_user'])
 
         self.detector = LayoutDetector(self.config, self.dictionary)
         self.replacer = Replacer()
         self._active = self.config.auto_mode
+        self._manual_hotkey_id = None
+        self._toggle_hotkey_id = None
         self._settings_window = SettingsWindow(
             self.config, self.dictionary, on_save=self._on_settings_save)
 
@@ -137,37 +157,49 @@ class RuSwitch:
         )
 
     def run(self) -> None:
-        """Start RuSwitch: keyboard hook in background, tray icon in main thread."""
         if sys.platform != 'win32':
             log.error('RuSwitch requires Windows. Exiting.')
             return
 
         import keyboard
 
-        # Register keyboard hook
         keyboard.on_press(self._on_key_press, suppress=False)
-
-        # Register hotkeys (suppress=True prevents default Insert behavior)
-        keyboard.add_hotkey(self.config.hotkey_manual, self._manual_remap,
-                            suppress=True)
-        keyboard.add_hotkey(self.config.hotkey_toggle, self._toggle,
-                            suppress=True)
+        self._register_hotkeys()
 
         log.info('RuSwitch started. Hotkeys: manual=%s, toggle=%s',
                  self.config.hotkey_manual, self.config.hotkey_toggle)
 
-        # Tray icon runs in main thread (pystray requirement on Windows)
         self.tray.run()
+
+    def _register_hotkeys(self) -> None:
+        """Register hotkeys, removing old ones first."""
+        import keyboard
+        # Remove previous hotkeys if any
+        if self._manual_hotkey_id is not None:
+            try:
+                keyboard.remove_hotkey(self._manual_hotkey_id)
+            except Exception:
+                pass
+        if self._toggle_hotkey_id is not None:
+            try:
+                keyboard.remove_hotkey(self._toggle_hotkey_id)
+            except Exception:
+                pass
+
+        self._manual_hotkey_id = keyboard.add_hotkey(
+            self.config.hotkey_manual, self._manual_remap, suppress=True)
+        self._toggle_hotkey_id = keyboard.add_hotkey(
+            self.config.hotkey_toggle, self._toggle, suppress=True)
+        log.info('Hotkeys registered: manual=%s, toggle=%s',
+                 self.config.hotkey_manual, self.config.hotkey_toggle)
 
     def _on_key_press(self, event) -> None:
         """Keyboard hook callback."""
         import keyboard as kb
 
-        # Skip our own keystrokes during replacement
         if self.replacer.is_replacing:
             return
 
-        # Check excluded process
         proc = _get_foreground_process()
         if proc in self.config.excluded_processes:
             return
@@ -175,15 +207,14 @@ class RuSwitch:
         # Clear buffer on modifier keys
         if event.name in ('ctrl', 'alt', 'shift', 'tab', 'escape',
                           'left ctrl', 'right ctrl', 'left alt', 'right alt',
-                          'left shift', 'right shift', 'caps lock'):
+                          'left shift', 'right shift', 'caps lock',
+                          'left windows', 'right windows'):
             self.detector.clear_buffer()
             return
 
-        # Get the physical key name from the keyboard library
         key_name = event.name
 
         if len(key_name) != 1:
-            # Handle special named keys
             if key_name == 'space':
                 key_name = ' '
             elif key_name == 'enter':
@@ -202,41 +233,44 @@ class RuSwitch:
         # Translate physical key to actual on-screen character
         if key_name in (' ', '\n'):
             actual_char = key_name
+            layout = _get_current_layout()
         else:
             layout = _get_current_layout()
             shift_held = kb.is_pressed('shift')
             actual_char = _translate_key(key_name, layout, shift_held)
 
-        log.debug('Key: %r → char: %r (layout=%s)',
-                  event.name, actual_char, layout if key_name not in (' ', '\n') else '-')
+        log.debug('key=%r layout=%s shift=%s -> char=%r buf=%s',
+                  event.name, layout,
+                  kb.is_pressed('shift') if key_name not in (' ', '\n') else '-',
+                  actual_char,
+                  ''.join(self.detector._buffer) + actual_char)
 
         result = self.detector.feed_char(actual_char)
         if result:
-            log.info('Correction: "%s" → "%s" (%s)',
-                     result.original, result.corrected, result.direction)
-            # Run replacement in separate thread to not block the hook
+            log.info('CORRECT: "%s" -> "%s" (%s) boundary=%r',
+                     result.original, result.corrected,
+                     result.direction, result.boundary_char)
             threading.Thread(
-                target=self._do_replace,
-                args=(result,),
-                daemon=True,
-            ).start()
+                target=self._do_replace, args=(result,), daemon=True).start()
 
     def _do_replace(self, result) -> None:
-        """Perform text replacement in a separate thread."""
-        self.replacer.replace_word(
+        success = self.replacer.replace_word(
             result.original, result.corrected, result.boundary_char)
-        if self.config.show_notification:
-            self.tray.notify(f'{result.original} → {result.corrected}')
+        log.info('REPLACE: %s -> %s  success=%s',
+                 result.original, result.corrected, success)
+        if success and self.config.show_notification:
+            self.tray.notify(f'{result.original} -> {result.corrected}')
 
     def _manual_remap(self) -> None:
-        """Insert key: force remap current buffer without dictionary check."""
+        log.info('MANUAL REMAP triggered (Insert/hotkey)')
         result = self.detector.force_check()
         if result:
-            log.info('Manual remap: "%s" → "%s"', result.original, result.corrected)
+            log.info('Manual: "%s" -> "%s"', result.original, result.corrected)
             self.replacer.replace_word(result.original, result.corrected)
+        else:
+            log.info('Manual: buffer empty or no remap possible')
 
     def _toggle(self) -> None:
-        """Toggle auto-correction on/off."""
         self._active = not self._active
         self.tray.update(self._active)
         state = 'ON' if self._active else 'OFF'
@@ -244,28 +278,19 @@ class RuSwitch:
         self.tray.notify(f'RuSwitch: {state}')
 
     def _show_add_word(self) -> None:
-        """Show add word dialog."""
         threading.Thread(target=self._settings_window._add_word_dialog,
                          daemon=True).start()
 
     def _show_settings(self) -> None:
-        """Show settings window in a separate thread."""
         threading.Thread(target=self._settings_window.show, daemon=True).start()
 
     def _on_settings_save(self) -> None:
-        """Called when settings are saved."""
         self._active = self.config.auto_mode
         self.tray.update(self._active)
-        import keyboard
-        keyboard.remove_all_hotkeys()
-        keyboard.add_hotkey(self.config.hotkey_manual, self._manual_remap,
-                            suppress=True)
-        keyboard.add_hotkey(self.config.hotkey_toggle, self._toggle,
-                            suppress=True)
+        self._register_hotkeys()
         log.info('Settings saved and applied')
 
     def _exit(self) -> None:
-        """Exit the application."""
         log.info('RuSwitch shutting down')
         self.tray.stop()
 
@@ -275,6 +300,8 @@ def main():
         log.warning('RuSwitch is already running.')
         return
 
+    log.info('=== RuSwitch starting ===')
+    log.info('Python %s, platform %s', sys.version, sys.platform)
     app = RuSwitch()
     app.run()
 
